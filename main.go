@@ -50,9 +50,14 @@ func extractServerAndPort(request []byte) string {
 
 func getRequestFromClient(client net.Conn, buffer []byte) ([]byte, error) {
 	//fmt.Println("waiting for request from the client")
-	// TODO: what if the request is chunked?
+	// TODO: what if the request is chunked? (is more than one packet?)
+	// TODO: can I upgrade to an HTTP reader that can handle this for me?
 	client.SetReadDeadline(time.Now().Add(30 * time.Second))
 	size, err := client.Read(buffer)
+
+	if size > 0 && err == io.EOF {
+		return buffer[:size], nil
+	}
 	if err != nil {
 		//fmt.Println("Client disconnected or error", err)
 		return nil, err
@@ -115,8 +120,8 @@ func transfer(src net.Conn, dst net.Conn, buffer []byte) error {
 		src.SetReadDeadline(time.Now().Add(time.Minute))
 		size, err := src.Read(buffer)
 		if err == io.EOF {
-			fmt.Println("no more data from", src.RemoteAddr().String())
-			return nil
+			//fmt.Println("no more data from", src.RemoteAddr().String())
+			return err
 		}
 		if err != nil {
 			fmt.Println("could not read data from", src.RemoteAddr().String())
@@ -129,7 +134,7 @@ func transfer(src net.Conn, dst net.Conn, buffer []byte) error {
 			fmt.Println("could not transfer data to", dst.RemoteAddr().String())
 			return err
 		}
-		fmt.Println("transfered", size, "bytes to", dst.RemoteAddr().String())
+		//fmt.Println("transfered", size, "bytes to", dst.RemoteAddr().String())
 		//fmt.Println(string(buffer[:size]))
 	}
 }
@@ -146,7 +151,7 @@ func handleConnection(client net.Conn) {
 			break
 		}
 		serverAddress := extractServerAndPort(request)
-		fmt.Println("will connect to server", serverAddress)
+		//fmt.Println("will connect to server", serverAddress)
 
 		// TODO: if it's the same server then no need to reconnect?
 		server, err := net.Dial("tcp", serverAddress)
@@ -169,7 +174,7 @@ func handleConnection(client net.Conn) {
 		}
 	}
 
-	fmt.Println("done with handleConnection for", client.RemoteAddr().String())
+	//fmt.Println("done with handleConnection for", client.RemoteAddr().String())
 }
 
 //*************************************************************************************************
@@ -184,7 +189,7 @@ func handleTunnelConnection(client net.Conn) {
 			break
 		}
 		serverAddress := extractServerAndPort(request)
-		fmt.Println("will connect to server", serverAddress)
+		//fmt.Println("will connect to server", serverAddress)
 
 		server, err := net.Dial("tcp", serverAddress)
 		if err != nil {
@@ -217,7 +222,7 @@ func handleTunnelConnection(client net.Conn) {
 		}
 	}
 
-	fmt.Println("done with handleTunnelConnection for", client.RemoteAddr().String())
+	//fmt.Println("done with handleTunnelConnection for", client.RemoteAddr().String())
 }
 
 //*************************************************************************************************
@@ -290,6 +295,9 @@ func handleInterceptConnection(client net.Conn, ca *x509.Certificate, caPEM []by
 		}
 		//fmt.Println("request sent to server")
 
+		// TODO: if there are more packets in the request, send those to the server too
+		//transfer(tlsClientConn, tlsServerConn, buffer)
+
 		// get response from the server
 		err = transferFromServerToClient(tlsServerConn, tlsClientConn, buffer, serverAddress)
 		if err != nil {
@@ -342,7 +350,8 @@ func saveURL(newURLs chan<- string, request []byte) {
 	}
 
 	if hostname == "" {
-		fmt.Println("***** could not find hostname for request:", strRequest)
+		//fmt.Println("***** could not find hostname for request:", strRequest)
+		return
 	}
 
 	// send the full URL to the go routine that's collecting them
@@ -434,7 +443,7 @@ func main() {
 	go func() {
 		for {
 			conn, err := httpListener.Accept()
-			fmt.Println("Received HTTP connection from", conn.RemoteAddr())
+			//fmt.Println("Received HTTP connection from", conn.RemoteAddr())
 			if err == nil {
 				go handleConnection(conn)
 			}
@@ -453,7 +462,7 @@ func main() {
 	go func() {
 		for {
 			conn, err := httpsListener.Accept()
-			fmt.Println("Received HTTPS connection from", conn.RemoteAddr())
+			//fmt.Println("Received HTTPS connection from", conn.RemoteAddr())
 			if err == nil {
 				go handleTunnelConnection(conn)
 			}

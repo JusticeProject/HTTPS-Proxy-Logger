@@ -183,6 +183,7 @@ func upgradeToTLS(conn net.Conn, serverCert *tls.Certificate) (*tls.Conn, error)
 	}
 
 	tlsConn := tls.Server(conn, tlsConfig)
+	tlsConn.SetDeadline(time.Now().Add(time.Minute))
 	err := tlsConn.Handshake()
 	return tlsConn, err
 }
