@@ -138,7 +138,7 @@ func createFakeCert(serverAddress string, ca *x509.Certificate, caPrivKey *rsa.P
 		},
 		DNSNames:     []string{hostname, "https://" + serverAddress},
 		URIs:         []*url.URL{&serverURL},
-		NotBefore:    time.Now(),
+		NotBefore:    time.Now().AddDate(0, -1, 0),
 		NotAfter:     time.Now().AddDate(10, 0, 0),
 		SubjectKeyId: []byte{1, 2, 3, 4, 6},
 		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth, x509.ExtKeyUsageServerAuth},
