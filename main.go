@@ -11,10 +11,20 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
 )
+
+//*************************************************************************************************
+
+type fileData struct {
+	fullURL  string
+	data     []byte
+	position int64
+}
 
 //*************************************************************************************************
 
@@ -85,9 +95,83 @@ func sendRequestToServer(server net.Conn, request []byte) error {
 
 //*************************************************************************************************
 
+func transferFromServerToClientAndSave(server net.Conn,
+	client net.Conn, buffer []byte, serverAddress string, fullURL string, saveDataChan chan<- *fileData) error {
+
+	packetNum := 0
+
+	for {
+		server.SetReadDeadline(time.Now().Add(15 * time.Second))
+		size, err := server.Read(buffer)
+		if err == io.EOF {
+			fmt.Println("no more data from", serverAddress, "packetNum:", packetNum)
+			return nil
+		} else if errors.Is(err, os.ErrDeadlineExceeded) {
+			fmt.Println("deadline exceeded", "packetNum:", packetNum)
+			return err
+		} else if err != nil {
+			fmt.Println("could not read data from", serverAddress, "packetNum:", packetNum)
+			return err
+		}
+
+		packetNum++
+
+		// if packetNum < 5 {
+		// 	strResponse := string(buffer[:size])
+		// 	strResponseSplit := strings.Split(strResponse, "\n")
+		// 	for i := 0; i < len(strResponseSplit); i++ {
+		// 		fmt.Println(strResponseSplit[i])
+		// 	}
+		// 	fmt.Printf("\nEnd of packet %v\n\n", packetNum)
+		// }
+
+		// send the data (without the headers) to a go routine that saves it to a file
+		if packetNum == 1 {
+			strResponse := string(buffer[:size])
+			strResponseSplit := strings.SplitN(strResponse, "\r\n\r\n", 2)
+			justTheDataBytes := []byte(strResponseSplit[1])
+
+			var dataToSave fileData
+			dataToSave.fullURL = fullURL
+			dataToSave.data = make([]byte, len(justTheDataBytes))
+			copy(dataToSave.data, justTheDataBytes)
+
+			// Typical format is:
+			// Content-Range: bytes 200114176-473388312/473388313
+			// (?i) means case-insensitive. Group 1 (the parentheses) contains the number we want.
+			re, _ := regexp.Compile(`(?i)Content-Range: bytes (\d+)-`)
+			regexResult := re.FindStringSubmatch(strResponseSplit[0])
+			if regexResult == nil {
+				dataToSave.position = 0
+			} else {
+				dataToSave.position, _ = strconv.ParseInt(regexResult[1], 10, 64)
+			}
+
+			saveDataChan <- &dataToSave
+		} else {
+			var dataToSave fileData
+			dataToSave.fullURL = fullURL
+			dataToSave.data = make([]byte, size)
+			dataToSave.position = 0
+			copy(dataToSave.data, buffer)
+			saveDataChan <- &dataToSave
+		}
+
+		client.SetWriteDeadline(time.Now().Add(time.Minute))
+		_, err = client.Write(buffer[:size])
+		if err != nil {
+			fmt.Println("could not transfer data from", serverAddress, "to client", "packetNum:", packetNum)
+			return err
+		}
+		//fmt.Println("transfered", n, "bytes from", serverAddress, "to client")
+		//fmt.Println(string(buffer[:n]))
+	}
+}
+
+//*************************************************************************************************
+
 func transferFromServerToClient(server net.Conn, client net.Conn, buffer []byte, serverAddress string) error {
-	// TODO: add rate-limiting
-	// TODO: if server uses transfer-encoding chunked then look for last chunk and then return
+
 	for {
 		server.SetReadDeadline(time.Now().Add(15 * time.Second))
 		size, err := server.Read(buffer)
@@ -95,16 +179,17 @@ func transferFromServerToClient(server net.Conn, client net.Conn, buffer []byte,
 			//fmt.Println("no more data from", serverAddress)
 			return nil
 		} else if errors.Is(err, os.ErrDeadlineExceeded) {
+			//fmt.Println("deadline exceeded")
 			return err
 		} else if err != nil {
-			fmt.Println("could not read data from", serverAddress)
+			//fmt.Println("could not read data from", serverAddress)
 			return err
 		}
 
 		client.SetWriteDeadline(time.Now().Add(time.Minute))
 		_, err = client.Write(buffer[:size])
 		if err != nil {
-			fmt.Println("could not transfer data from", serverAddress, "to client")
+			//fmt.Println("could not transfer data from", serverAddress, "to client")
 			return err
 		}
 		//fmt.Println("transfered", n, "bytes from", serverAddress, "to client")
@@ -115,7 +200,7 @@ func transferFromServerToClient(server net.Conn, client net.Conn, buffer []byte,
 //*************************************************************************************************
 
 func transfer(src net.Conn, dst net.Conn, buffer []byte) error {
-	// TODO: add rate-limiting
+
 	for {
 		src.SetReadDeadline(time.Now().Add(time.Minute))
 		size, err := src.Read(buffer)
@@ -141,7 +226,7 @@ func transfer(src net.Conn, dst net.Conn, buffer []byte) error {
 
 //*************************************************************************************************
 
-func handleConnection(client net.Conn) {
+func handleConnection(logData bool, client net.Conn, saveDataChan chan *fileData) {
 	defer client.Close()
 	buffer := make([]byte, 4096)
 
@@ -151,9 +236,11 @@ func handleConnection(client net.Conn) {
 			break
 		}
 		serverAddress := extractServerAndPort(request)
-		//fmt.Println("will connect to server", serverAddress)
+		fmt.Println("will connect to server", serverAddress)
 
-		// TODO: if it's the same server then no need to reconnect?
+		fullURL := getFullURL(request)
+		fmt.Println("full URL:", fullURL)
+
 		server, err := net.Dial("tcp", serverAddress)
 		if err != nil {
 			fmt.Println("could not connect to", serverAddress)
@@ -168,9 +255,16 @@ func handleConnection(client net.Conn) {
 			break
 		}
 
-		err = transferFromServerToClient(server, client, buffer, serverAddress)
-		if err != nil {
-			break
+		if logData {
+			err = transferFromServerToClientAndSave(server, client, buffer, serverAddress, fullURL, saveDataChan)
+			if err != nil {
+				break
+			}
+		} else {
+			err = transferFromServerToClient(server, client, buffer, serverAddress)
+			if err != nil {
+				break
+			}
 		}
 	}
 
@@ -233,7 +327,7 @@ func handleInterceptConnection(client net.Conn, ca *x509.Certificate, caPEM []by
 
 	request, err := getRequestFromClient(client, buffer)
 	if err != nil {
-		fmt.Println("could not get initial request when intercepting client", client.RemoteAddr().String(), err)
+		//fmt.Println("could not get initial request when intercepting client", client.RemoteAddr().String(), err)
 		return
 	}
 	serverAddress := extractServerAndPort(request)
@@ -256,7 +350,7 @@ func handleInterceptConnection(client net.Conn, ca *x509.Certificate, caPEM []by
 	// do TLS handshake with the client
 	tlsClientConn, err := upgradeToTLS(client, serverCert)
 	if err != nil {
-		fmt.Println("could not upgrade to TLS", err)
+		//fmt.Println("could not upgrade to TLS", err)
 		return
 	}
 	//fmt.Println("upgraded to TLS")
@@ -269,7 +363,7 @@ func handleInterceptConnection(client net.Conn, ca *x509.Certificate, caPEM []by
 		&tls.Config{CurvePreferences: []tls.CurveID{tls.CurveP256}, MinVersion: tls.VersionTLS12},
 	)
 	if err != nil {
-		fmt.Println("could not make TLS connection with server")
+		//fmt.Println("could not make TLS connection with server")
 		return
 	}
 	defer tlsServerConn.Close()
@@ -281,12 +375,13 @@ func handleInterceptConnection(client net.Conn, ca *x509.Certificate, caPEM []by
 		if err != nil {
 			break
 		}
-		//strRequest := strings.Split(string(request), "\n")
-		//fmt.Println(strRequest[0], "\n", strRequest[1])
-		//fmt.Println(string(request))
 
 		// get the full URL and save it
-		saveURL(newURLs, request)
+		fullURL := getFullURL(request)
+		//fmt.Println("full URL:", fullURL)
+		if len(fullURL) > 0 {
+			newURLs <- fullURL
+		}
 
 		// send the request to the server
 		err = sendRequestToServer(tlsServerConn, request)
@@ -321,12 +416,12 @@ func isASCII(s string) bool {
 
 //*************************************************************************************************
 
-func saveURL(newURLs chan<- string, request []byte) {
+func getFullURL(request []byte) string {
 	strRequest := string(request)
 
 	// if the first few chars are not ASCII, don't continue, it might be a binary upload of data to the server
 	if !isASCII(strRequest[:4]) {
-		return
+		return ""
 	}
 
 	lines := strings.Split(strRequest, "\n")
@@ -335,7 +430,7 @@ func saveURL(newURLs chan<- string, request []byte) {
 	firstLine := lines[0]
 	firstLineSplit := strings.Split(firstLine, " ")
 	if len(firstLineSplit) <= 1 {
-		return
+		return ""
 	}
 	relPath := firstLineSplit[1]
 
@@ -351,12 +446,58 @@ func saveURL(newURLs chan<- string, request []byte) {
 
 	if hostname == "" {
 		//fmt.Println("***** could not find hostname for request:", strRequest)
-		return
+		return ""
 	}
 
-	// send the full URL to the go routine that's collecting them
-	fullURL := hostname + relPath
-	newURLs <- fullURL
+	if strings.Contains(relPath, hostname) {
+		return relPath
+	} else {
+		return hostname + relPath
+	}
+}
+
+//*************************************************************************************************
+
+func saveDataToFile(saveDataChan <-chan *fileData) {
+	// create a data folder if it doesn't exist
+	_, err := os.Stat("data")
+	if err != nil {
+		os.Mkdir("data", 0666)
+	}
+
+	for {
+		newData := <-saveDataChan
+
+		// figure out the file name we will use locally
+		urlSplit := strings.Split(newData.fullURL, "/")
+		fileName := "./data/" + urlSplit[len(urlSplit)-1]
+
+		fd, err := os.OpenFile(fileName, os.O_CREATE|os.O_WRONLY, 0777)
+		if err != nil {
+			fmt.Println("could not open file")
+			continue
+		}
+		if newData.position > 0 {
+			_, err = fd.Seek(newData.position, 0)
+			if err != nil {
+				fmt.Println("could not seek to position")
+				continue
+			}
+		} else {
+			info, _ := fd.Stat()
+			_, err = fd.Seek(info.Size(), 0)
+			if err != nil {
+				fmt.Println("could not seek to end of file")
+				continue
+			}
+		}
+
+		_, err = fd.Write(newData.data)
+		if err != nil {
+			fmt.Println("failed writing to file")
+		}
+		fd.Close()
+	}
 }
 
 //*************************************************************************************************
@@ -383,9 +524,10 @@ func gatherURLs(newURLs <-chan string, requestURLs <-chan bool, sendURLs chan<- 
 //*************************************************************************************************
 
 func serveURLs(port string, requestURLs chan<- bool, recvURLs <-chan []string) {
-	fmt.Printf("serving URLs on %v/urls\n", port)
+	fmt.Printf("serving URLs on %v/urls.html\n", port)
+	fmt.Printf("serving data on %v/datalist.html\n", port)
 
-	http.HandleFunc("/urls", func(w http.ResponseWriter, req *http.Request) {
+	http.HandleFunc("/urls.html", func(w http.ResponseWriter, req *http.Request) {
 		// send a message to the other go routine and wait for the response containing the URLs
 		requestURLs <- true
 		allURLs := <-recvURLs
@@ -400,6 +542,26 @@ func serveURLs(port string, requestURLs chan<- bool, recvURLs <-chan []string) {
 
 		// finish with the standard HTML info
 		fmt.Fprint(w, "</body>\n</html>")
+	})
+
+	http.HandleFunc("/datalist.html", func(w http.ResponseWriter, req *http.Request) {
+		// start with the standard HTML info
+		fmt.Fprint(w, "<!DOCTYPE html>\n<html>\n<head>\n<meta charset=\"utf-8\">\n<title>List of Data</title>\n</head>\n<body>\n")
+
+		// create a link for each file
+		dir, _ := os.ReadDir("./data")
+		for i := 0; i < len(dir); i++ {
+			fmt.Fprintf(w, "<a href=\"/data/%v\">%v</a><br>\n", dir[i].Name(), dir[i].Name())
+		}
+
+		// finish with the standard HTML info
+		fmt.Fprint(w, "</body>\n</html>")
+	})
+
+	http.HandleFunc("/data/", func(w http.ResponseWriter, req *http.Request) {
+		name := req.URL.Path[len("/data/"):]
+		fmt.Println(name, "requested")
+		http.ServeFile(w, req, "./data/"+name)
 	})
 
 	err := http.ListenAndServe(port, nil)
@@ -429,7 +591,10 @@ func main() {
 	requestURLs := make(chan bool)
 	sendURLs := make(chan []string)
 	go gatherURLs(newURLs, requestURLs, sendURLs)
-	go serveURLs(":2003", requestURLs, sendURLs)
+	go serveURLs(":2004", requestURLs, sendURLs)
+
+	saveDataChan := make(chan *fileData, 20)
+	go saveDataToFile(saveDataChan)
 
 	//****************************************************
 
@@ -438,26 +603,45 @@ func main() {
 		fmt.Println("Unable to bind to port")
 		os.Exit(1)
 	}
-	fmt.Println("Listening on 0.0.0.0:2000 for HTTP")
+	fmt.Println("Listening on 0.0.0.0:2000 for HTTP proxy")
 
 	go func() {
 		for {
 			conn, err := httpListener.Accept()
 			//fmt.Println("Received HTTP connection from", conn.RemoteAddr())
 			if err == nil {
-				go handleConnection(conn)
+				go handleConnection(false, conn, saveDataChan)
 			}
 		}
 	}()
 
 	//****************************************************
 
-	httpsListener, err := net.Listen("tcp", ":2001")
+	httpListenerLogger, err := net.Listen("tcp", ":2001")
 	if err != nil {
 		fmt.Println("Unable to bind to port")
 		os.Exit(1)
 	}
-	fmt.Println("Listening on 0.0.0.0:2001 for HTTPS")
+	fmt.Println("Listening on 0.0.0.0:2001 for HTTP proxy logger")
+
+	go func() {
+		for {
+			conn, err := httpListenerLogger.Accept()
+			//fmt.Println("Received HTTP connection from", conn.RemoteAddr())
+			if err == nil {
+				go handleConnection(true, conn, saveDataChan)
+			}
+		}
+	}()
+
+	//****************************************************
+
+	httpsListener, err := net.Listen("tcp", ":2002")
+	if err != nil {
+		fmt.Println("Unable to bind to port")
+		os.Exit(1)
+	}
+	fmt.Println("Listening on 0.0.0.0:2002 for HTTPS tunnel")
 
 	go func() {
 		for {
@@ -471,12 +655,12 @@ func main() {
 
 	//****************************************************
 
-	interceptListener, err := net.Listen("tcp", ":2002")
+	interceptListener, err := net.Listen("tcp", ":2003")
 	if err != nil {
 		fmt.Println("Unable to bind to port")
 		os.Exit(1)
 	}
-	fmt.Println("Listening on 0.0.0.0:2002 for HTTPS intercept")
+	fmt.Println("Listening on 0.0.0.0:2003 for HTTPS intercept")
 
 	for {
 		conn, err := interceptListener.Accept()
