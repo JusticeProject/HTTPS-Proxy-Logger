@@ -6,7 +6,6 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -19,6 +18,7 @@ import (
 )
 
 //*************************************************************************************************
+//*************************************************************************************************
 
 type fileData struct {
 	fullURL  string
@@ -26,6 +26,61 @@ type fileData struct {
 	position int64
 }
 
+//*************************************************************************************************
+//*************************************************************************************************
+
+func ping(localAddress, remoteAddress string) bool {
+	localAddress += ":0"
+	// not an actual ping (ICMP echo), but good enough for now
+	fmt.Println("'pinging' using local address", localAddress)
+
+	lAddress, err := net.ResolveTCPAddr("tcp", localAddress)
+	if err != nil {
+		return false
+	}
+
+	rAddress, err := net.ResolveTCPAddr("tcp", remoteAddress)
+	if err != nil {
+		return false
+	}
+
+	conn, err := net.DialTCP("tcp", lAddress, rAddress)
+	if err != nil {
+		fmt.Println(err)
+		return false
+	}
+
+	fmt.Println("connected using", conn.LocalAddr().String())
+	conn.Close()
+
+	return true
+}
+
+//*************************************************************************************************
+//*************************************************************************************************
+
+func getLocalIP() (string, error) {
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		fmt.Println("could not get host's addresses")
+	}
+
+	for i := 0; i < len(addrs); i++ {
+		localAddr := addrs[i].String()
+		if strings.HasPrefix(localAddr, "192.168.1.") {
+			localAddr = strings.Split(localAddr, "/")[0]
+
+			// make sure this address is usable (connected to the internet)
+			if ping(localAddr, "www.google.com:443") {
+				return localAddr, nil
+			}
+		}
+	}
+
+	return "", errors.New("could not find local address")
+}
+
+//*************************************************************************************************
 //*************************************************************************************************
 
 func extractServerAndPort(request []byte) string {
@@ -51,31 +106,28 @@ func extractServerAndPort(request []byte) string {
 		}
 	}
 
-	//secure := (port == "443") || (parsed.Scheme == "https")
-
 	return serverName + ":" + port
 }
 
 //*************************************************************************************************
+//*************************************************************************************************
 
-func getRequestFromClient(client net.Conn, buffer []byte) ([]byte, error) {
-	//fmt.Println("waiting for request from the client")
-	// TODO: what if the request is chunked? (is more than one packet?)
-	// TODO: can I upgrade to an HTTP reader that can handle this for me?
-	client.SetReadDeadline(time.Now().Add(30 * time.Second))
-	size, err := client.Read(buffer)
-
-	if size > 0 && err == io.EOF {
-		return buffer[:size], nil
+func getRequestFromClient(client net.Conn, buffer []byte, timeout bool) ([]byte, error) {
+	if timeout {
+		client.SetReadDeadline(time.Now().Add(30 * time.Second))
+	} else {
+		client.SetReadDeadline(time.Time{})
 	}
+
+	size, err := client.Read(buffer)
 	if err != nil {
-		//fmt.Println("Client disconnected or error", err)
 		return nil, err
 	}
 	//fmt.Println("Read", size, "bytes:")
 	return buffer[:size], nil
 }
 
+//*************************************************************************************************
 //*************************************************************************************************
 
 func sendOkToClient(client net.Conn) error {
@@ -86,6 +138,7 @@ func sendOkToClient(client net.Conn) error {
 }
 
 //*************************************************************************************************
+//*************************************************************************************************
 
 func sendRequestToServer(server net.Conn, request []byte) error {
 	server.SetWriteDeadline(time.Now().Add(time.Minute))
@@ -93,6 +146,7 @@ func sendRequestToServer(server net.Conn, request []byte) error {
 	return err
 }
 
+//*************************************************************************************************
 //*************************************************************************************************
 
 func transferFromServerToClientAndSave(server net.Conn,
@@ -103,13 +157,7 @@ func transferFromServerToClientAndSave(server net.Conn,
 	for {
 		server.SetReadDeadline(time.Now().Add(15 * time.Second))
 		size, err := server.Read(buffer)
-		if err == io.EOF {
-			fmt.Println("no more data from", serverAddress, "packetNum:", packetNum)
-			return nil
-		} else if errors.Is(err, os.ErrDeadlineExceeded) {
-			fmt.Println("deadline exceeded", "packetNum:", packetNum)
-			return err
-		} else if err != nil {
+		if err != nil {
 			fmt.Println("could not read data from", serverAddress, "packetNum:", packetNum)
 			return err
 		}
@@ -163,25 +211,23 @@ func transferFromServerToClientAndSave(server net.Conn,
 			fmt.Println("could not transfer data from", serverAddress, "to client", "packetNum:", packetNum)
 			return err
 		}
-		//fmt.Println("transfered", n, "bytes from", serverAddress, "to client")
-		//fmt.Println(string(buffer[:n]))
 	}
 }
 
 //*************************************************************************************************
+//*************************************************************************************************
 
-func transferFromServerToClient(server net.Conn, client net.Conn, buffer []byte, serverAddress string) error {
+func transferFromServerToClient(server net.Conn, client net.Conn, buffer []byte, serverAddress string, disconnectOnErr bool) error {
+	if disconnectOnErr {
+		// these defers will run when the function exits
+		defer server.Close()
+		defer client.Close()
+	}
 
 	for {
-		server.SetReadDeadline(time.Now().Add(15 * time.Second))
+		server.SetReadDeadline(time.Now().Add(30 * time.Second))
 		size, err := server.Read(buffer)
-		if err == io.EOF {
-			//fmt.Println("no more data from", serverAddress)
-			return nil
-		} else if errors.Is(err, os.ErrDeadlineExceeded) {
-			//fmt.Println("deadline exceeded")
-			return err
-		} else if err != nil {
+		if err != nil {
 			//fmt.Println("could not read data from", serverAddress)
 			return err
 		}
@@ -192,11 +238,10 @@ func transferFromServerToClient(server net.Conn, client net.Conn, buffer []byte,
 			//fmt.Println("could not transfer data from", serverAddress, "to client")
 			return err
 		}
-		//fmt.Println("transfered", n, "bytes from", serverAddress, "to client")
-		//fmt.Println(string(buffer[:n]))
 	}
 }
 
+//*************************************************************************************************
 //*************************************************************************************************
 
 func transfer(src net.Conn, dst net.Conn, buffer []byte) error {
@@ -204,10 +249,6 @@ func transfer(src net.Conn, dst net.Conn, buffer []byte) error {
 	for {
 		src.SetReadDeadline(time.Now().Add(time.Minute))
 		size, err := src.Read(buffer)
-		if err == io.EOF {
-			//fmt.Println("no more data from", src.RemoteAddr().String())
-			return err
-		}
 		if err != nil {
 			fmt.Println("could not read data from", src.RemoteAddr().String())
 			return err
@@ -219,58 +260,50 @@ func transfer(src net.Conn, dst net.Conn, buffer []byte) error {
 			fmt.Println("could not transfer data to", dst.RemoteAddr().String())
 			return err
 		}
-		//fmt.Println("transfered", size, "bytes to", dst.RemoteAddr().String())
-		//fmt.Println(string(buffer[:size]))
 	}
 }
 
+//*************************************************************************************************
 //*************************************************************************************************
 
 func handleConnection(logData bool, client net.Conn, saveDataChan chan *fileData) {
 	defer client.Close()
 	buffer := make([]byte, 4096)
 
-	for {
-		request, err := getRequestFromClient(client, buffer)
-		if err != nil {
-			break
-		}
-		serverAddress := extractServerAndPort(request)
-		fmt.Println("will connect to server", serverAddress)
+	request, err := getRequestFromClient(client, buffer, false)
+	if err != nil {
+		return
+	}
+	serverAddress := extractServerAndPort(request)
+	fmt.Println("will connect to server", serverAddress)
 
-		fullURL := getFullURL(request)
-		fmt.Println("full URL:", fullURL)
+	fullURL := getFullURL(request)
+	fmt.Println("full URL:", fullURL)
 
-		server, err := net.Dial("tcp", serverAddress)
-		if err != nil {
-			fmt.Println("could not connect to", serverAddress)
-			break
-		}
+	server, err := net.Dial("tcp", serverAddress)
+	if err != nil {
+		fmt.Println("could not connect to", serverAddress)
+		return
+	}
 
-		defer server.Close()
+	defer server.Close()
 
-		err = sendRequestToServer(server, request)
-		if err != nil {
-			fmt.Println("could not send request to server", serverAddress)
-			break
-		}
+	err = sendRequestToServer(server, request)
+	if err != nil {
+		fmt.Println("could not send request to server", serverAddress)
+		return
+	}
 
-		if logData {
-			err = transferFromServerToClientAndSave(server, client, buffer, serverAddress, fullURL, saveDataChan)
-			if err != nil {
-				break
-			}
-		} else {
-			err = transferFromServerToClient(server, client, buffer, serverAddress)
-			if err != nil {
-				break
-			}
-		}
+	if logData {
+		transferFromServerToClientAndSave(server, client, buffer, serverAddress, fullURL, saveDataChan)
+	} else {
+		transferFromServerToClient(server, client, buffer, serverAddress, false)
 	}
 
 	//fmt.Println("done with handleConnection for", client.RemoteAddr().String())
 }
 
+//*************************************************************************************************
 //*************************************************************************************************
 
 func handleTunnelConnection(client net.Conn) {
@@ -278,7 +311,7 @@ func handleTunnelConnection(client net.Conn) {
 	buffer := make([]byte, 4096)
 
 	for {
-		request, err := getRequestFromClient(client, buffer)
+		request, err := getRequestFromClient(client, buffer, false)
 		if err != nil {
 			break
 		}
@@ -320,14 +353,14 @@ func handleTunnelConnection(client net.Conn) {
 }
 
 //*************************************************************************************************
+//*************************************************************************************************
 
 func handleInterceptConnection(client net.Conn, ca *x509.Certificate, caPEM []byte, caPrivKey *rsa.PrivateKey, newURLs chan<- string) {
 	defer client.Close()
 	buffer := make([]byte, 4096)
 
-	request, err := getRequestFromClient(client, buffer)
+	request, err := getRequestFromClient(client, buffer, true)
 	if err != nil {
-		//fmt.Println("could not get initial request when intercepting client", client.RemoteAddr().String(), err)
 		return
 	}
 	serverAddress := extractServerAndPort(request)
@@ -369,9 +402,13 @@ func handleInterceptConnection(client net.Conn, ca *x509.Certificate, caPEM []by
 	defer tlsServerConn.Close()
 	//fmt.Println("connected to the server", serverAddress)
 
+	// start a go routine to transfer all response data from the server to the client
+	buffer2 := make([]byte, 4096)
+	go transferFromServerToClient(tlsServerConn, tlsClientConn, buffer2, serverAddress, true)
+
 	for {
 		// receive HTTPS request from client
-		request, err = getRequestFromClient(tlsClientConn, buffer)
+		request, err = getRequestFromClient(tlsClientConn, buffer, false)
 		if err != nil {
 			break
 		}
@@ -389,20 +426,12 @@ func handleInterceptConnection(client net.Conn, ca *x509.Certificate, caPEM []by
 			break
 		}
 		//fmt.Println("request sent to server")
-
-		// TODO: if there are more packets in the request, send those to the server too
-		//transfer(tlsClientConn, tlsServerConn, buffer)
-
-		// get response from the server
-		err = transferFromServerToClient(tlsServerConn, tlsClientConn, buffer, serverAddress)
-		if err != nil {
-			break
-		}
 	}
 
 	//fmt.Println("done with handleInterceptConnection for", client.RemoteAddr().String())
 }
 
+//*************************************************************************************************
 //*************************************************************************************************
 
 func isASCII(s string) bool {
@@ -414,6 +443,7 @@ func isASCII(s string) bool {
 	return true
 }
 
+//*************************************************************************************************
 //*************************************************************************************************
 
 func getFullURL(request []byte) string {
@@ -456,6 +486,7 @@ func getFullURL(request []byte) string {
 	}
 }
 
+//*************************************************************************************************
 //*************************************************************************************************
 
 func saveDataToFile(saveDataChan <-chan *fileData) {
@@ -501,6 +532,7 @@ func saveDataToFile(saveDataChan <-chan *fileData) {
 }
 
 //*************************************************************************************************
+//*************************************************************************************************
 
 func gatherURLs(newURLs <-chan string, requestURLs <-chan bool, sendURLs chan<- []string) {
 	queue := make([]string, 0)
@@ -522,10 +554,11 @@ func gatherURLs(newURLs <-chan string, requestURLs <-chan bool, sendURLs chan<- 
 }
 
 //*************************************************************************************************
+//*************************************************************************************************
 
-func serveURLs(port string, requestURLs chan<- bool, recvURLs <-chan []string) {
-	fmt.Printf("serving URLs on %v/urls.html\n", port)
-	fmt.Printf("serving data on %v/datalist.html\n", port)
+func serveURLs(addr string, requestURLs chan<- bool, recvURLs <-chan []string) {
+	fmt.Printf("serving URLs on %v/urls.html\n", addr)
+	fmt.Printf("serving data on %v/datalist.html\n", addr)
 
 	http.HandleFunc("/urls.html", func(w http.ResponseWriter, req *http.Request) {
 		// send a message to the other go routine and wait for the response containing the URLs
@@ -564,17 +597,23 @@ func serveURLs(port string, requestURLs chan<- bool, recvURLs <-chan []string) {
 		http.ServeFile(w, req, "./data/"+name)
 	})
 
-	err := http.ListenAndServe(port, nil)
+	err := http.ListenAndServe(addr, nil)
 	if err != nil {
-		fmt.Println("Unable to server urls on port", port)
+		fmt.Println("Unable to server urls on address", addr)
 		os.Exit(1)
 	}
 }
 
 //*************************************************************************************************
+//*************************************************************************************************
 
 func main() {
 	fmt.Println("Starting server")
+	localIP, err := getLocalIP()
+	if err != nil {
+		fmt.Println(err)
+		os.Exit(1)
+	}
 
 	//****************************************************
 
@@ -587,23 +626,23 @@ func main() {
 
 	//****************************************************
 
-	newURLs := make(chan string, 10)
-	requestURLs := make(chan bool)
-	sendURLs := make(chan []string)
+	newURLs := make(chan string, 10) // channel that all new URLs will be sent to for collection
+	requestURLs := make(chan bool)   // a go routine can request all the current URLs by sending true to this channel and then...
+	sendURLs := make(chan []string)  // ...a go routine will receive the requested URLs on this channel
 	go gatherURLs(newURLs, requestURLs, sendURLs)
-	go serveURLs(":2004", requestURLs, sendURLs)
+	go serveURLs(localIP+":2004", requestURLs, sendURLs)
 
 	saveDataChan := make(chan *fileData, 20)
 	go saveDataToFile(saveDataChan)
 
 	//****************************************************
 
-	httpListener, err := net.Listen("tcp", ":2000")
+	httpListener, err := net.Listen("tcp", localIP+":2000")
 	if err != nil {
 		fmt.Println("Unable to bind to port")
 		os.Exit(1)
 	}
-	fmt.Println("Listening on 0.0.0.0:2000 for HTTP proxy")
+	fmt.Println("Listening on", localIP+":2000", "for HTTP proxy")
 
 	go func() {
 		for {
@@ -617,12 +656,12 @@ func main() {
 
 	//****************************************************
 
-	httpListenerLogger, err := net.Listen("tcp", ":2001")
+	httpListenerLogger, err := net.Listen("tcp", localIP+":2001")
 	if err != nil {
 		fmt.Println("Unable to bind to port")
 		os.Exit(1)
 	}
-	fmt.Println("Listening on 0.0.0.0:2001 for HTTP proxy logger")
+	fmt.Println("Listening on", localIP+":2001", "for HTTP proxy logger")
 
 	go func() {
 		for {
@@ -636,12 +675,12 @@ func main() {
 
 	//****************************************************
 
-	httpsListener, err := net.Listen("tcp", ":2002")
+	httpsListener, err := net.Listen("tcp", localIP+":2002")
 	if err != nil {
 		fmt.Println("Unable to bind to port")
 		os.Exit(1)
 	}
-	fmt.Println("Listening on 0.0.0.0:2002 for HTTPS tunnel")
+	fmt.Println("Listening on", localIP+":2002", "for HTTPS tunnel")
 
 	go func() {
 		for {
@@ -655,12 +694,12 @@ func main() {
 
 	//****************************************************
 
-	interceptListener, err := net.Listen("tcp", ":2003")
+	interceptListener, err := net.Listen("tcp", localIP+":2003")
 	if err != nil {
 		fmt.Println("Unable to bind to port")
 		os.Exit(1)
 	}
-	fmt.Println("Listening on 0.0.0.0:2003 for HTTPS intercept")
+	fmt.Println("Listening on", localIP+":2003", "for HTTPS intercept")
 
 	for {
 		conn, err := interceptListener.Accept()
