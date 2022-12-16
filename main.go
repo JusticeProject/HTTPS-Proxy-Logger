@@ -20,6 +20,12 @@ import (
 //*************************************************************************************************
 //*************************************************************************************************
 
+// if we only want to save data with a specific extension, we can specify it here or in the command line argument
+var saveExtension string = ""
+
+//*************************************************************************************************
+//*************************************************************************************************
+
 type fileData struct {
 	fullURL  string
 	data     []byte
@@ -150,7 +156,11 @@ func sendRequestToServer(server net.Conn, request []byte) error {
 //*************************************************************************************************
 
 func transferFromServerToClientAndSave(server net.Conn,
-	client net.Conn, buffer []byte, serverAddress string, fullURL string, saveDataChan chan<- *fileData) error {
+	client net.Conn, buffer []byte, serverAddress string, fullURL string, saveDataChan chan<- *fileData, fullURLChan <-chan string) error {
+
+	// these defers will run when the function exits
+	defer server.Close()
+	defer client.Close()
 
 	packetNum := 0
 
@@ -173,36 +183,73 @@ func transferFromServerToClientAndSave(server net.Conn,
 		// 	fmt.Printf("\nEnd of packet %v\n\n", packetNum)
 		// }
 
-		// send the data (without the headers) to a go routine that saves it to a file
-		if packetNum == 1 {
-			strResponse := string(buffer[:size])
-			strResponseSplit := strings.SplitN(strResponse, "\r\n\r\n", 2)
-			justTheDataBytes := []byte(strResponseSplit[1])
+		if fullURLChan != nil {
+			newURL := ""
 
-			var dataToSave fileData
-			dataToSave.fullURL = fullURL
-			dataToSave.data = make([]byte, len(justTheDataBytes))
-			copy(dataToSave.data, justTheDataBytes)
+			// if fullURL is empty then wait with a 5 second timeout
+			// otherwise if fullURL is a valid URL then read from the channel with no wait
+			if len(fullURL) == 0 {
+				//fmt.Println("waiting 5 seconds for URL")
+				timeout := time.After(5 * time.Second)
 
-			// Typical format is:
-			// Content-Range: bytes 200114176-473388312/473388313
-			// (?i) means case-insensitive. Group 1 (the parentheses) contains the number we want.
-			re, _ := regexp.Compile(`(?i)Content-Range: bytes (\d+)-`)
-			regexResult := re.FindStringSubmatch(strResponseSplit[0])
-			if regexResult == nil {
-				dataToSave.position = 0
+				select {
+				case newURL = <-fullURLChan:
+				case <-timeout:
+					fmt.Println("timeout waiting for URL")
+				}
 			} else {
-				dataToSave.position, _ = strconv.ParseInt(regexResult[1], 10, 64)
+				select {
+				case newURL = <-fullURLChan:
+				default:
+				}
 			}
 
-			saveDataChan <- &dataToSave
-		} else {
-			var dataToSave fileData
-			dataToSave.fullURL = fullURL
-			dataToSave.data = make([]byte, size)
-			dataToSave.position = 0
-			copy(dataToSave.data, buffer)
-			saveDataChan <- &dataToSave
+			// only save it if it seems valid
+			if len(newURL) > 0 {
+				if len(saveExtension) > 0 && strings.Contains(newURL, saveExtension) {
+					fmt.Println("newURL:", newURL)
+				}
+				fullURL = newURL
+			}
+		}
+
+		// send the data (without the headers) to a go routine that saves it to a file
+		// only send the data if it matches the required extension
+		// TODO: need better method to determine when the headers are finished, could span more than 1 packet,
+		// TODO: track it with bool headerFinished or do another read right away if \r\n\r\n is not present?
+		if len(saveExtension) > 0 && strings.Contains(fullURL, saveExtension) {
+			if packetNum == 1 {
+				strResponse := string(buffer[:size])
+				strResponseSplit := strings.SplitN(strResponse, "\r\n\r\n", 2)
+				if len(strResponseSplit) > 1 {
+					justTheDataBytes := []byte(strResponseSplit[1])
+
+					var dataToSave fileData
+					dataToSave.fullURL = fullURL
+					dataToSave.data = make([]byte, len(justTheDataBytes))
+					copy(dataToSave.data, justTheDataBytes)
+
+					// Typical format is:
+					// Content-Range: bytes 200114176-473388312/473388313
+					// (?i) means case-insensitive. Group 1 (the parentheses) contains the number we want.
+					re, _ := regexp.Compile(`(?i)Content-Range: bytes (\d+)-`)
+					regexResult := re.FindStringSubmatch(strResponseSplit[0])
+					if regexResult == nil {
+						dataToSave.position = 0
+					} else {
+						dataToSave.position, _ = strconv.ParseInt(regexResult[1], 10, 64)
+					}
+
+					saveDataChan <- &dataToSave
+				}
+			} else {
+				var dataToSave fileData
+				dataToSave.fullURL = fullURL
+				dataToSave.data = make([]byte, size)
+				dataToSave.position = 0
+				copy(dataToSave.data, buffer)
+				saveDataChan <- &dataToSave
+			}
 		}
 
 		client.SetWriteDeadline(time.Now().Add(time.Minute))
@@ -217,12 +264,10 @@ func transferFromServerToClientAndSave(server net.Conn,
 //*************************************************************************************************
 //*************************************************************************************************
 
-func transferFromServerToClient(server net.Conn, client net.Conn, buffer []byte, serverAddress string, disconnectOnErr bool) error {
-	if disconnectOnErr {
-		// these defers will run when the function exits
-		defer server.Close()
-		defer client.Close()
-	}
+func transferFromServerToClient(server net.Conn, client net.Conn, buffer []byte) error {
+	// these defers will run when the function exits
+	defer server.Close()
+	defer client.Close()
 
 	for {
 		server.SetReadDeadline(time.Now().Add(30 * time.Second))
@@ -275,10 +320,10 @@ func handleConnection(logData bool, client net.Conn, saveDataChan chan *fileData
 		return
 	}
 	serverAddress := extractServerAndPort(request)
-	fmt.Println("will connect to server", serverAddress)
+	//fmt.Println("will connect to server", serverAddress)
 
 	fullURL := getFullURL(request)
-	fmt.Println("full URL:", fullURL)
+	//fmt.Println("full URL:", fullURL)
 
 	server, err := net.Dial("tcp", serverAddress)
 	if err != nil {
@@ -295,9 +340,9 @@ func handleConnection(logData bool, client net.Conn, saveDataChan chan *fileData
 	}
 
 	if logData {
-		transferFromServerToClientAndSave(server, client, buffer, serverAddress, fullURL, saveDataChan)
+		transferFromServerToClientAndSave(server, client, buffer, serverAddress, fullURL, saveDataChan, nil)
 	} else {
-		transferFromServerToClient(server, client, buffer, serverAddress, false)
+		transferFromServerToClient(server, client, buffer)
 	}
 
 	//fmt.Println("done with handleConnection for", client.RemoteAddr().String())
@@ -355,7 +400,9 @@ func handleTunnelConnection(client net.Conn) {
 //*************************************************************************************************
 //*************************************************************************************************
 
-func handleInterceptConnection(client net.Conn, ca *x509.Certificate, caPEM []byte, caPrivKey *rsa.PrivateKey, newURLs chan<- string) {
+func handleInterceptConnection(client net.Conn, ca *x509.Certificate, caPEM []byte, caPrivKey *rsa.PrivateKey,
+	newURLs chan<- string, saveDataChan chan *fileData) {
+
 	defer client.Close()
 	buffer := make([]byte, 4096)
 
@@ -404,7 +451,8 @@ func handleInterceptConnection(client net.Conn, ca *x509.Certificate, caPEM []by
 
 	// start a go routine to transfer all response data from the server to the client
 	buffer2 := make([]byte, 4096)
-	go transferFromServerToClient(tlsServerConn, tlsClientConn, buffer2, serverAddress, true)
+	fullURLChan := make(chan string, 2)
+	go transferFromServerToClientAndSave(tlsServerConn, tlsClientConn, buffer2, serverAddress, "", saveDataChan, fullURLChan)
 
 	for {
 		// receive HTTPS request from client
@@ -419,6 +467,9 @@ func handleInterceptConnection(client net.Conn, ca *x509.Certificate, caPEM []by
 		if len(fullURL) > 0 {
 			newURLs <- fullURL
 		}
+
+		// send the fullURL to the go routine transferFromServerToClientAndSave
+		fullURLChan <- fullURL
 
 		// send the request to the server
 		err = sendRequestToServer(tlsServerConn, request)
@@ -499,13 +550,20 @@ func saveDataToFile(saveDataChan <-chan *fileData) {
 	for {
 		newData := <-saveDataChan
 
+		// check if we should save it
+		if len(saveExtension) > 0 {
+			if !strings.Contains(newData.fullURL, saveExtension) {
+				continue
+			}
+		}
+
 		// figure out the file name we will use locally
 		urlSplit := strings.Split(newData.fullURL, "/")
 		fileName := "./data/" + urlSplit[len(urlSplit)-1]
 
 		fd, err := os.OpenFile(fileName, os.O_CREATE|os.O_WRONLY, 0777)
 		if err != nil {
-			fmt.Println("could not open file")
+			fmt.Println("could not open file:", fileName)
 			continue
 		}
 		if newData.position > 0 {
@@ -542,7 +600,7 @@ func gatherURLs(newURLs <-chan string, requestURLs <-chan bool, sendURLs chan<- 
 		select {
 		case url := <-newURLs:
 			queue = append(queue, url)
-			if len(queue) > 100 {
+			if len(queue) > 1000 {
 				queue = queue[1:]
 			}
 		case <-requestURLs:
@@ -609,6 +667,16 @@ func serveURLs(addr string, requestURLs chan<- bool, recvURLs <-chan []string) {
 
 func main() {
 	fmt.Println("Starting server")
+
+	if len(os.Args) > 1 {
+		saveExtension = os.Args[1]
+		fmt.Println("will only save data with extension", saveExtension)
+	} else {
+		fmt.Println("will save all data")
+	}
+
+	//****************************************************
+
 	localIP, err := getLocalIP()
 	if err != nil {
 		fmt.Println(err)
@@ -705,7 +773,7 @@ func main() {
 		conn, err := interceptListener.Accept()
 		//fmt.Println("Received HTTPS connection from", conn.RemoteAddr())
 		if err == nil {
-			go handleInterceptConnection(conn, ca, caPEM, caPrivKey, newURLs)
+			go handleInterceptConnection(conn, ca, caPEM, caPrivKey, newURLs, saveDataChan)
 		}
 	}
 }
