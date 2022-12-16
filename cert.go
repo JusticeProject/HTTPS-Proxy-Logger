@@ -22,23 +22,23 @@ import (
 
 func loadCA() (*x509.Certificate, []byte, *rsa.PrivateKey, error) {
 	// if ca doesn't exist, create it and the private key
-	_, err := os.Stat("./ca.pem")
+	_, err := os.Stat("./cert/ca.pem")
 	if err != nil {
 		return createCA()
 	}
 
 	// if private key doesn't exist, create it and the ca
-	_, err = os.Stat("./key.pem")
+	_, err = os.Stat("./cert/key.pem")
 	if err != nil {
 		return createCA()
 	}
 
 	// both files exist, so load them
-	caPEM, err := os.ReadFile("./ca.pem")
+	caPEM, err := os.ReadFile("./cert/ca.pem")
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	caPrivKeyPEM, err := os.ReadFile("./key.pem")
+	caPrivKeyPEM, err := os.ReadFile("./cert/key.pem")
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -104,12 +104,12 @@ func createCA() (*x509.Certificate, []byte, *rsa.PrivateKey, error) {
 		Bytes: x509.MarshalPKCS1PrivateKey(caPrivKey),
 	})
 
-	err = os.WriteFile("./ca.pem", caPEM.Bytes(), 0777)
+	err = os.WriteFile("./cert/ca.pem", caPEM.Bytes(), 0777)
 	if err != nil {
 		return nil, nil, nil, err
 	}
 
-	err = os.WriteFile("./key.pem", caPrivKeyPEM.Bytes(), 0777)
+	err = os.WriteFile("./cert/key.pem", caPrivKeyPEM.Bytes(), 0777)
 	if err != nil {
 		return nil, nil, nil, err
 	}
