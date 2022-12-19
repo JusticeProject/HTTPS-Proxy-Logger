@@ -217,7 +217,7 @@ func transferFromServerToClientAndSave(server net.Conn,
 		// only send the data if it matches the required extension
 		// TODO: need better method to determine when the headers are finished, could span more than 1 packet,
 		// TODO: track it with bool headerFinished or do another read right away if \r\n\r\n is not present?
-		if len(saveExtension) > 0 && strings.Contains(fullURL, saveExtension) {
+		if saveExtension == "" || strings.Contains(fullURL, saveExtension) {
 			if packetNum == 1 {
 				strResponse := string(buffer[:size])
 				strResponseSplit := strings.SplitN(strResponse, "\r\n\r\n", 2)
@@ -549,13 +549,6 @@ func saveDataToFile(saveDataChan <-chan *fileData) {
 
 	for {
 		newData := <-saveDataChan
-
-		// check if we should save it
-		if len(saveExtension) > 0 {
-			if !strings.Contains(newData.fullURL, saveExtension) {
-				continue
-			}
-		}
 
 		// figure out the file name we will use locally
 		urlSplit := strings.Split(newData.fullURL, "/")
