@@ -187,3 +187,28 @@ func upgradeToTLS(conn net.Conn, serverCert *tls.Certificate) (*tls.Conn, error)
 	err := tlsConn.Handshake()
 	return tlsConn, err
 }
+
+//*************************************************************************************************
+
+func connectWithTLS(serverAddress string) (*tls.Conn, error) {
+	tlsServerConn, err := tls.DialWithDialer(
+		&net.Dialer{Timeout: 30 * time.Second},
+		"tcp",
+		serverAddress,
+		&tls.Config{CurvePreferences: []tls.CurveID{tls.CurveP256}, MinVersion: tls.VersionTLS12},
+	)
+
+	if err == nil {
+		return tlsServerConn, err
+	}
+
+	// try different settings if the previous method did not work
+	tlsServerConn, err = tls.DialWithDialer(
+		&net.Dialer{Timeout: 30 * time.Second},
+		"tcp",
+		serverAddress,
+		nil,
+	)
+
+	return tlsServerConn, err
+}

@@ -2,7 +2,6 @@ package main
 
 import (
 	"crypto/rsa"
-	"crypto/tls"
 	"crypto/x509"
 	"errors"
 	"fmt"
@@ -436,14 +435,9 @@ func handleInterceptConnection(client net.Conn, ca *x509.Certificate, caPEM []by
 	//fmt.Println("upgraded to TLS")
 
 	// make TLS connection to the server
-	tlsServerConn, err := tls.DialWithDialer(
-		&net.Dialer{Timeout: 30 * time.Second},
-		"tcp",
-		serverAddress,
-		&tls.Config{CurvePreferences: []tls.CurveID{tls.CurveP256}, MinVersion: tls.VersionTLS12},
-	)
+	tlsServerConn, err := connectWithTLS(serverAddress)
 	if err != nil {
-		//fmt.Println("could not make TLS connection with server")
+		//fmt.Println("could not make TLS connection with server:", err)
 		return
 	}
 	defer tlsServerConn.Close()
@@ -552,7 +546,10 @@ func saveDataToFile(saveDataChan <-chan *fileData) {
 
 		// figure out the file name we will use locally
 		urlSplit := strings.Split(newData.fullURL, "/")
-		fileName := "./data/" + urlSplit[len(urlSplit)-1]
+		fileName := urlSplit[len(urlSplit)-1]
+		fileName = strings.Split(fileName, "?")[0]
+		fileName = "./data/" + fileName
+		//fmt.Println("*saving:", newData.fullURL, fileName)
 
 		fd, err := os.OpenFile(fileName, os.O_CREATE|os.O_WRONLY, 0777)
 		if err != nil {
